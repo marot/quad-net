@@ -2,6 +2,10 @@
 
 #[cfg(target_arch = "wasm32")]
 use sapp_jsutils::JsObject;
+use std::future::Future;
+use std::task::{Context, Poll, Waker};
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, PartialEq, Copy)]
 pub enum Method {
@@ -48,14 +52,33 @@ extern "C" {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub struct Request {
+    shared_state: Arc<Mutex<SharedState>>
+}
+
+struct SharedState {
     rx: std::sync::mpsc::Receiver<Result<String, HttpError>>,
+    waker: Option<Waker>,
+}
+
+impl Future for Request {
+    type Output = Result<String, HttpError>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut shared_state = self.shared_state.lock().unwrap();
+        if let Some(result) = shared_state.rx.try_recv().ok() {
+            return Poll::Ready(result)
+        }
+
+        shared_state.waker = Some(cx.waker().clone());
+        Poll::Pending
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Request {
-    pub fn try_recv(&mut self) -> Option<Result<String, HttpError>> {
-        self.rx.try_recv().ok()
-    }
+    // pub fn try_recv(&mut self) -> Option<Result<String, HttpError>> {
+    //     self.rx.try_recv().ok()
+    // }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -122,31 +145,39 @@ impl RequestBuilder {
         use std::sync::mpsc::channel;
 
         let (tx, rx) = channel();
+        let request = Request { shared_state: Arc::new(Mutex::new(SharedState { rx, waker: None })) };
 
-        std::thread::spawn(move || {
-            let method = match self.method {
-                Method::Post => ureq::post,
-                Method::Put => ureq::put,
-                Method::Get => ureq::get,
-                Method::Delete => ureq::delete,
-            };
+        std::thread::spawn({
+            let state = request.shared_state.clone();
+            move || {
+                let method = match self.method {
+                    Method::Post => ureq::post,
+                    Method::Put => ureq::put,
+                    Method::Get => ureq::get,
+                    Method::Delete => ureq::delete,
+                };
 
-            let mut request = method(&self.url);
-            for (header, value) in self.headers {
-                request = request.set(&header, &value)
+                let mut request = method(&self.url);
+                for (header, value) in self.headers {
+                    request = request.set(&header, &value)
+                }
+                let response: Result<String, HttpError> = if let Some(body) = self.body {
+                    request.send_string(&body)
+                } else {
+                    request.call()
+                }
+                    .map_err(|err| err.into())
+                    .and_then(|response| response.into_string().map_err(|err| err.into()));
+
+                tx.send(response).unwrap();
+                let mut shared_state = state.lock().unwrap();
+                if let Some(waker) = shared_state.waker.take() {
+                    waker.wake();
+                }
             }
-            let response: Result<String, HttpError> = if let Some(body) = self.body {
-                request.send_string(&body)
-            } else {
-                request.call()
-            }
-            .map_err(|err| err.into())
-            .and_then(|response| response.into_string().map_err(|err| err.into()));
-
-            tx.send(response).unwrap();
         });
 
-        Request { rx }
+        request
     }
 
     #[cfg(target_arch = "wasm32")]

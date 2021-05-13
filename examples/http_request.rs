@@ -1,15 +1,15 @@
-use macroquad::prelude::*;
-
 use quad_net::http_request::RequestBuilder;
+use futures::executor::block_on;
 
-#[macroquad::main("Http request demo")]
-async fn main() {
-    let mut request = RequestBuilder::new("http://127.0.0.1:4000/").send();
+fn main() {
+    let future = async {
+        // let mut request = RequestBuilder::new("http://127.0.0.1:4000/").send();
+        let mut request = RequestBuilder::new("http://google.com/").send();
 
-    loop {
-        if let Some(data) = request.try_recv() {
-            info!("Done! {}", data.unwrap());
-        }
-        next_frame().await;
-    }
+        let result = request.await;
+
+        println!("Done! {:?}", result);
+    };
+
+    block_on(future);
 }

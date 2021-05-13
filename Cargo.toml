@@ -22,3 +22,4 @@ sapp-jsutils = "0.1"
 [dev-dependencies]
 nanoserde = { version = "0.1" }
 macroquad = { version = "0.3.0-alpha" }
+futures = "0.3.15"
